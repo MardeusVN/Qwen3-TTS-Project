@@ -1,0 +1,208 @@
+# ============================================================================
+# Qwen3-TTS-12Hz Pre-training Stage 3: Long-Context Stage (S3)
+# Paper §3.2 (3): "increase the maximum token length from 8,192 to 32,768 
+# and upsample long speech in the training data."
+# ============================================================================
+
+stage: s3_long_context
+description: "Long-context stage: extend max_position_embeddings from 8K to 32K"
+resume_from: outputs/checkpoints/s2_high_quality/checkpoint-final
+
+# ---------------------------------------------------------------------------
+# MODEL CONFIGURATION
+# Thay đổi chính: max_position_embeddings=32768, thêm rope_scaling (YaRN)
+# ---------------------------------------------------------------------------
+model:
+  model_type: qwen3_tts
+  tokenizer_type: qwen3_tts_tokenizer_12hz
+  tts_model_size: "1.7b"
+  tts_model_type: base
+  
+  im_start_token_id: 151644
+  im_end_token_id: 151645
+  tts_pad_token_id: 151671
+  tts_bos_token_id: 151672
+  tts_eos_token_id: 151673
+  
+  talker_config:
+    model_type: qwen3_tts_talker
+    vocab_size: 4206
+    text_vocab_size: 3072
+    hidden_size: 2048
+    intermediate_size: 6144
+    num_hidden_layers: 24
+    num_attention_heads: 16
+    num_key_value_heads: 2
+    hidden_act: silu
+    max_position_embeddings: 32768    # ★ S3: Tăng từ 8192 → 32768
+    initializer_range: 0.02
+    rms_norm_eps: 0.000001
+    use_cache: true
+    tie_word_embeddings: false
+    rope_theta: 10000.0
+    
+    # ★ RoPE scaling (YaRN) để extend context length
+    rope_scaling:
+      rope_type: yarn
+      factor: 4.0                     # 8192 * 4 = 32768
+      original_max_position_embeddings: 8192
+      attention_factor: 1.0
+      beta_fast: 32
+      beta_slow: 1
+    
+    attention_bias: false
+    use_sliding_window: false
+    sliding_window: 4096
+    attention_dropout: 0.0
+    num_code_groups: 16
+    
+    codec_eos_token_id: 4198
+    codec_think_id: 4202
+    codec_nothink_id: 4203
+    codec_think_bos_id: 4204
+    codec_think_eos_id: 4205
+    codec_pad_id: 4196
+    codec_bos_id: 4197
+    
+    codec_language_id:
+      chinese: 4199
+      english: 4200
+      japanese: 4201
+      korean: 4206
+      german: 4208
+      italian: 4209
+      portuguese: 4210
+      spanish: 4211
+      french: 4212
+      russian: 4213
+    
+    spk_id: {}
+    spk_is_dialect: {}
+    
+    code_predictor_config:
+      model_type: qwen3_tts_talker_code_predictor
+      vocab_size: 2048
+      hidden_size: 1024
+      intermediate_size: 3072
+      num_hidden_layers: 5
+      num_attention_heads: 16
+      num_key_value_heads: 8
+      head_dim: 128
+      hidden_act: silu
+      max_position_embeddings: 32768
+      initializer_range: 0.02
+      rms_norm_eps: 0.000001
+      use_cache: true
+      tie_word_embeddings: false
+      rope_theta: 10000.0
+      attention_bias: false
+      use_sliding_window: false
+      sliding_window: 4096
+      max_window_layers: 28
+      attention_dropout: 0.0
+      num_code_groups: 16
+  
+  speaker_encoder_config:
+    mel_dim: 128
+    enc_dim: 1024
+    enc_channels: [512, 512, 512, 512, 1536]
+    enc_kernel_sizes: [5, 3, 3, 3, 1]
+    enc_dilations: [1, 2, 3, 4, 1]
+    enc_attention_channels: 128
+    enc_res2net_scale: 8
+    enc_se_channels: 128
+    sample_rate: 24000
+
+# ---------------------------------------------------------------------------
+# DATA CONFIGURATION
+# Paper §3.2: "upsample long speech in the training data"
+# ---------------------------------------------------------------------------
+data:
+  train_dir: data/pretrain/s3/train
+  val_dir: data/pretrain/s3/val
+  max_codec_len: 4096        # Max codec frames (~327 seconds audio at 12.5Hz)
+  min_duration: 0.5
+  max_duration: 600.0        # Tối đa 10 phút audio
+  languages:
+    - chinese
+    - english
+    - german
+    - italian
+    - portuguese
+    - spanish
+    - japanese
+    - korean
+    - french
+    - russian
+  
+  # ★ Upsample long speech (Paper §3.2)
+  long_speech_threshold: 60.0          # seconds
+  long_speech_upsample_ratio: 3.0      # Nhân 3 lần samples > 60s
+  
+  language_weights:
+    chinese: 0.35
+    english: 0.30
+    german: 0.05
+    italian: 0.05
+    portuguese: 0.05
+    spanish: 0.05
+    japanese: 0.05
+    korean: 0.05
+    french: 0.05
+    russian: 0.05
+
+# ---------------------------------------------------------------------------
+# TRAINING HYPERPARAMETERS
+# S3 dùng LR thấp nhất, batch size nhỏ hơn do context dài
+# ---------------------------------------------------------------------------
+training:
+  optimizer: adamw
+  learning_rate: 1.0e-5       # Thấp nhất trong 3 stages
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  
+  lr_scheduler: cosine
+  warmup_ratio: 0.0
+  max_grad_norm: 1.0
+  
+  num_train_epochs: 1
+  per_device_train_batch_size: 2       # Nhỏ hơn do context 32K
+  gradient_accumulation_steps: 64      # Global batch ~128
+  
+  bf16: true
+  tf32: true
+  
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  prefetch_factor: 2
+  
+  output_dir: outputs/checkpoints/s3_long_context
+  save_strategy: steps
+  save_steps: 1000
+  save_total_limit: 3
+  logging_steps: 10
+  
+  gradient_checkpointing: true        # Bắt buộc cho 32K context
+  
+  fsdp: full_shard auto_wrap
+  fsdp_config:
+    min_num_params: 10000000
+    transformer_layer_cls_to_wrap: Qwen3TTSTalkerDecoderLayer
+    backward_prefetch: backward_pre
+    forward_prefetch: true
+  
+  report_to: wandb
+  run_name: qwen3_tts_12hz_s3_long_context
+  
+  remove_unused_columns: false
+  seed: 42
+
+loss:
+  talker_weight: 1.0
+  mtp_weight: 1.0
+  ignore_index: -100
+
+tokenizer:
+  path: Qwen/Qwen3-TTS-Tokenizer-12Hz
+  freeze: true

@@ -1,0 +1,215 @@
+# ============================================================================
+# Qwen3-TTS-12Hz Pre-training Stage 1: General Stage (S1)
+# Paper §3.2 (1): "leverage over 5 million hours of multilingual speech data 
+# to train Qwen3-TTS. This stage establishes a monotonic mapping from 
+# multilingual text representations to speech and builds general capabilities."
+# ============================================================================
+
+stage: s1_general
+description: "General pre-training stage on 5M+ hours multilingual speech data"
+resume_from: null  # null = train from scratch; hoặc path tới checkpoint
+
+# ---------------------------------------------------------------------------
+# MODEL CONFIGURATION
+# Bám sát configuration_qwen3_tts.py
+# Model size: 1.7B parameters (theo Table 1 paper)
+# ---------------------------------------------------------------------------
+model:
+  model_type: qwen3_tts
+  tokenizer_type: qwen3_tts_tokenizer_12hz
+  tts_model_size: "1.7b"
+  tts_model_type: base  # base | voice_design | custom_voice
+  
+  # Special token IDs (từ configuration_qwen3_tts.py)
+  im_start_token_id: 151644
+  im_end_token_id: 151645
+  tts_pad_token_id: 151671
+  tts_bos_token_id: 151672
+  tts_eos_token_id: 151673
+  
+  talker_config:
+    model_type: qwen3_tts_talker
+    vocab_size: 4206          # Codec vocab size
+    text_vocab_size: 3072     # Text vocab size
+    hidden_size: 2048         # 1.7B model
+    intermediate_size: 6144
+    num_hidden_layers: 24
+    num_attention_heads: 16
+    num_key_value_heads: 2    # GQA with 2 KV heads
+    hidden_act: silu
+    max_position_embeddings: 8192   # S1: 8K context (Paper §3.2)
+    initializer_range: 0.02
+    rms_norm_eps: 0.000001
+    use_cache: true
+    tie_word_embeddings: false
+    rope_theta: 10000.0
+    rope_scaling: null        # Không dùng rope scaling cho S1
+    attention_bias: false
+    use_sliding_window: false
+    sliding_window: 4096
+    attention_dropout: 0.0
+    num_code_groups: 16       # 12Hz tokenizer có 16 quantizers
+    
+    # Codec special token IDs (từ Qwen3TTSTalkerConfig)
+    codec_eos_token_id: 4198
+    codec_think_id: 4202
+    codec_nothink_id: 4203
+    codec_think_bos_id: 4204
+    codec_think_eos_id: 4205
+    codec_pad_id: 4196
+    codec_bos_id: 4197
+    
+    # Language & speaker mappings
+    codec_language_id:
+      chinese: 4199
+      english: 4200
+      japanese: 4201
+      korean: 4206
+      german: 4208
+      italian: 4209
+      portuguese: 4210
+      spanish: 4211
+      french: 4212
+      russian: 4213
+    
+    spk_id: {}              # Empty cho S1 (chưa có predefined speakers)
+    spk_is_dialect: {}
+    
+    # Code Predictor (MTP module) config
+    code_predictor_config:
+      model_type: qwen3_tts_talker_code_predictor
+      vocab_size: 2048
+      hidden_size: 1024
+      intermediate_size: 3072
+      num_hidden_layers: 5
+      num_attention_heads: 16
+      num_key_value_heads: 8
+      head_dim: 128
+      hidden_act: silu
+      max_position_embeddings: 32768
+      initializer_range: 0.02
+      rms_norm_eps: 0.000001
+      use_cache: true
+      tie_word_embeddings: false
+      rope_theta: 10000.0
+      attention_bias: false
+      use_sliding_window: false
+      sliding_window: 4096
+      max_window_layers: 28
+      attention_dropout: 0.0
+      num_code_groups: 16
+  
+  speaker_encoder_config:
+    mel_dim: 128
+    enc_dim: 1024
+    enc_channels: [512, 512, 512, 512, 1536]
+    enc_kernel_sizes: [5, 3, 3, 3, 1]
+    enc_dilations: [1, 2, 3, 4, 1]
+    enc_attention_channels: 128
+    enc_res2net_scale: 8
+    enc_se_channels: 128
+    sample_rate: 24000
+
+# ---------------------------------------------------------------------------
+# DATA CONFIGURATION
+# ---------------------------------------------------------------------------
+data:
+  train_dir: data/pretrain/s1/train
+  val_dir: data/pretrain/s1/val
+  max_codec_len: 2048       # Max codec frames (~163 seconds audio at 12.5Hz)
+  min_duration: 0.5          # seconds
+  max_duration: 30.0         # seconds
+  languages:                 # 10 languages (Paper Table 6)
+    - chinese
+    - english
+    - german
+    - italian
+    - portuguese
+    - spanish
+    - japanese
+    - korean
+    - french
+    - russian
+  language_weights:          # Sampling weights cho multilingual mixing
+    chinese: 0.35
+    english: 0.30
+    german: 0.05
+    italian: 0.05
+    portuguese: 0.05
+    spanish: 0.05
+    japanese: 0.05
+    korean: 0.05
+    french: 0.05
+    russian: 0.05
+  long_speech_upsample_ratio: 1.0  # S1 không upsample long speech
+
+# ---------------------------------------------------------------------------
+# TRAINING HYPERPARAMETERS (Paper §3.2)
+# ---------------------------------------------------------------------------
+training:
+  # Optimizer
+  optimizer: adamw
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  
+  # Scheduler
+  lr_scheduler: cosine
+  warmup_ratio: 0.01
+  max_grad_norm: 1.0
+  
+  # Training schedule
+  num_train_epochs: 1
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 128    # Global batch ~512 (8 GPUs)
+  
+  # Mixed precision
+  bf16: true
+  tf32: true
+  
+  # Dataloader
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  prefetch_factor: 2
+  
+  # Checkpointing & logging
+  output_dir: outputs/checkpoints/s1_general
+  save_strategy: steps
+  save_steps: 2000
+  save_total_limit: 3
+  logging_steps: 10
+  
+  # Gradient checkpointing (tiết kiệm VRAM)
+  gradient_checkpointing: true
+  
+  # FSDP (Fully Sharded Data Parallel)
+  fsdp: full_shard auto_wrap
+  fsdp_config:
+    min_num_params: 10000000          # 10M params threshold
+    transformer_layer_cls_to_wrap: Qwen3TTSTalkerDecoderLayer
+    backward_prefetch: backward_pre
+    forward_prefetch: true
+  
+  # WandB
+  report_to: wandb
+  run_name: qwen3_tts_12hz_s1_general
+  
+  # Misc
+  remove_unused_columns: false
+  seed: 42
+
+# ---------------------------------------------------------------------------
+# LOSS CONFIGURATION
+# ---------------------------------------------------------------------------
+loss:
+  talker_weight: 1.0       # Weight cho Talker loss (codebook 0)
+  mtp_weight: 1.0          # Weight cho MTP loss (codebooks 1-15)
+  ignore_index: -100       # Padding ignore index
+
+# ---------------------------------------------------------------------------
+# TOKENIZER
+# ---------------------------------------------------------------------------
+tokenizer:
+  path: Qwen/Qwen3-TTS-Tokenizer-12Hz
+  freeze: true             # Tokenizer luôn freeze

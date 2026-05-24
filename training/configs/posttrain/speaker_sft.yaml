@@ -1,0 +1,235 @@
+# ============================================================================
+# Qwen3-TTS-12Hz Post-training: Lightweight Speaker Fine-Tuning
+# Paper §3.2: "lightweight speaker fine-tuning on the base model, enabling 
+# Qwen3-TTS to adopt specific voices while further improving naturalness, 
+# expressiveness, and controllability."
+# ============================================================================
+
+stage: speaker_sft
+description: "Lightweight speaker fine-tuning for specific voice profiles"
+resume_from: outputs/checkpoints/gspo/checkpoint-final
+
+# Target speaker info
+target_speaker:
+  name: aiden
+  spk_id: 3000              # Embedding ID trong spk_id dict
+  is_dialect: false
+  description: "Male voice, warm and confident"
+
+# ---------------------------------------------------------------------------
+# MODEL CONFIGURATION
+# Sau SFT: tts_model_type = custom_voice, spk_id sẽ được thêm vào config
+# ---------------------------------------------------------------------------
+model:
+  model_type: qwen3_tts
+  tokenizer_type: qwen3_tts_tokenizer_12hz
+  tts_model_size: "1.7b"
+  tts_model_type: custom_voice   # ★ custom_voice sau speaker SFT
+  
+  im_start_token_id: 151644
+  im_end_token_id: 151645
+  tts_pad_token_id: 151671
+  tts_bos_token_id: 151672
+  tts_eos_token_id: 151673
+  
+  talker_config:
+    model_type: qwen3_tts_talker
+    vocab_size: 4206
+    text_vocab_size: 3072
+    hidden_size: 2048
+    intermediate_size: 6144
+    num_hidden_layers: 24
+    num_attention_heads: 16
+    num_key_value_heads: 2
+    hidden_act: silu
+    max_position_embeddings: 32768
+    initializer_range: 0.02
+    rms_norm_eps: 0.000001
+    use_cache: true
+    tie_word_embeddings: false
+    rope_theta: 10000.0
+    rope_scaling:
+      rope_type: yarn
+      factor: 4.0
+      original_max_position_embeddings: 8192
+      attention_factor: 1.0
+      beta_fast: 32
+      beta_slow: 1
+    attention_bias: false
+    use_sliding_window: false
+    sliding_window: 4096
+    attention_dropout: 0.0
+    num_code_groups: 16
+    
+    codec_eos_token_id: 4198
+    codec_think_id: 4202
+    codec_nothink_id: 4203
+    codec_think_bos_id: 4204
+    codec_think_eos_id: 4205
+    codec_pad_id: 4196
+    codec_bos_id: 4197
+    
+    codec_language_id:
+      chinese: 4199
+      english: 4200
+      japanese: 4201
+      korean: 4206
+      german: 4208
+      italian: 4209
+      portuguese: 4210
+      spanish: 4211
+      french: 4212
+      russian: 4213
+    
+    # ★ Speaker ID sẽ được thêm vào sau SFT
+    spk_id:
+      aiden: 3000
+    spk_is_dialect:
+      aiden: false
+    
+    code_predictor_config:
+      model_type: qwen3_tts_talker_code_predictor
+      vocab_size: 2048
+      hidden_size: 1024
+      intermediate_size: 3072
+      num_hidden_layers: 5
+      num_attention_heads: 16
+      num_key_value_heads: 8
+      head_dim: 128
+      hidden_act: silu
+      max_position_embeddings: 32768
+      initializer_range: 0.02
+      rms_norm_eps: 0.000001
+      use_cache: true
+      tie_word_embeddings: false
+      rope_theta: 10000.0
+      attention_bias: false
+      use_sliding_window: false
+      sliding_window: 4096
+      max_window_layers: 28
+      attention_dropout: 0.0
+      num_code_groups: 16
+  
+  speaker_encoder_config:
+    mel_dim: 128
+    enc_dim: 1024
+    enc_channels: [512, 512, 512, 512, 1536]
+    enc_kernel_sizes: [5, 3, 3, 3, 1]
+    enc_dilations: [1, 2, 3, 4, 1]
+    enc_attention_channels: 128
+    enc_res2net_scale: 8
+    enc_se_channels: 128
+    sample_rate: 24000
+
+# ---------------------------------------------------------------------------
+# DATA CONFIGURATION
+# Data cho target speaker
+# ---------------------------------------------------------------------------
+data:
+  train_dir: data/posttrain/speaker_sft/aiden/train
+  val_dir: data/posttrain/speaker_sft/aiden/val
+  max_codec_len: 2048
+  min_duration: 0.5
+  max_duration: 30.0
+  
+  languages:
+    - chinese
+    - english
+    - german
+    - italian
+    - portuguese
+    - spanish
+    - japanese
+    - korean
+    - french
+    - russian
+
+# ---------------------------------------------------------------------------
+# FREEZE CONFIGURATION
+# Paper §3.2: "lightweight speaker fine-tuning"
+# Freeze backbone, chỉ train adapter layers
+# ---------------------------------------------------------------------------
+freeze:
+  freeze_backbone: true           # Freeze toàn bộ talker.model (backbone)
+  freeze_speaker_encoder: true    # Freeze speaker encoder
+  
+  # Modules được train
+  trainable_modules:
+    - talker.text_projection      # Text → codec space adapter
+    - talker.codec_head            # Output head cho codebook 0
+    - talker.code_predictor       # MTP module (codebooks 1-15)
+    - talker.codec_embedding       # Codec embedding table
+  
+  # Speaker embedding sẽ được set tại spk_id position
+  # sau khi tính target_speaker_embedding từ reference audio
+  inject_speaker_embedding: true
+  speaker_embedding_position: 6   # Position trong codec prefill (từ sft_12hz.py)
+
+# ---------------------------------------------------------------------------
+# TRAINING HYPERPARAMETERS
+# Paper §3.2: "lightweight" → LR cao hơn, ít epochs
+# ---------------------------------------------------------------------------
+training:
+  optimizer: adamw
+  learning_rate: 2.0e-5       # Cao hơn pre-training
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  
+  lr_scheduler: cosine
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  
+  num_train_epochs: 3          # Ít epochs (Paper: "lightweight")
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8       # Global batch ~16
+  
+  bf16: true
+  tf32: true
+  
+  dataloader_num_workers: 4
+  dataloader_pin_memory: true
+  
+  output_dir: outputs/checkpoints/speaker_sft_aiden
+  save_strategy: epoch
+  save_total_limit: 3
+  logging_steps: 5
+  
+  # Evaluation
+  eval_strategy: epoch
+  
+  gradient_checkpointing: true
+  
+  # Speaker SFT nhẹ → có thể dùng DDP thay vì FSDP
+  # Nhưng vẫn dùng FSDP cho consistency
+  fsdp: full_shard auto_wrap
+  fsdp_config:
+    min_num_params: 10000000
+    transformer_layer_cls_to_wrap: Qwen3TTSTalkerDecoderLayer
+  
+  report_to: wandb
+  run_name: qwen3_tts_12hz_speaker_sft_aiden
+  
+  remove_unused_columns: false
+  seed: 42
+
+loss:
+  talker_weight: 1.0
+  mtp_weight: 0.3             # Giảm MTP weight cho SFT (focus vào codebook 0)
+  ignore_index: -100
+
+# ---------------------------------------------------------------------------
+# SAVE CONFIG
+# Sau SFT, config.json sẽ được update:
+# - tts_model_type: custom_voice
+# - spk_id: {speaker_name: embedding_id}
+# - codec_embedding.weight[spk_id] = target_speaker_embedding
+# ---------------------------------------------------------------------------
+save:
+  # Sau khi SFT xong, copy toàn bộ model dir và update config.json
+  save_speaker_embedding_to_weight: true
+  update_config_tts_model_type: custom_voice
+
+tokenizer:
+  path: Qwen/Qwen3-TTS-Tokenizer-12Hz
+  freeze: true

@@ -1,0 +1,199 @@
+# ============================================================================
+# Qwen3-TTS-12Hz Post-training: Direct Preference Optimization (DPO)
+# Paper §3.2: "construct preference pairs for multilingual speech samples 
+# based on human feedback and then perform DPO on Qwen3-TTS."
+# ============================================================================
+
+stage: dpo
+description: "Direct Preference Optimization for human preference alignment"
+resume_from: outputs/checkpoints/s3_long_context/checkpoint-final
+
+# ---------------------------------------------------------------------------
+# MODEL CONFIGURATION (giống S3)
+# ---------------------------------------------------------------------------
+model:
+  model_type: qwen3_tts
+  tokenizer_type: qwen3_tts_tokenizer_12hz
+  tts_model_size: "1.7b"
+  tts_model_type: base
+  
+  im_start_token_id: 151644
+  im_end_token_id: 151645
+  tts_pad_token_id: 151671
+  tts_bos_token_id: 151672
+  tts_eos_token_id: 151673
+  
+  talker_config:
+    model_type: qwen3_tts_talker
+    vocab_size: 4206
+    text_vocab_size: 3072
+    hidden_size: 2048
+    intermediate_size: 6144
+    num_hidden_layers: 24
+    num_attention_heads: 16
+    num_key_value_heads: 2
+    hidden_act: silu
+    max_position_embeddings: 32768
+    initializer_range: 0.02
+    rms_norm_eps: 0.000001
+    use_cache: true
+    tie_word_embeddings: false
+    rope_theta: 10000.0
+    rope_scaling:
+      rope_type: yarn
+      factor: 4.0
+      original_max_position_embeddings: 8192
+      attention_factor: 1.0
+      beta_fast: 32
+      beta_slow: 1
+    attention_bias: false
+    use_sliding_window: false
+    sliding_window: 4096
+    attention_dropout: 0.0
+    num_code_groups: 16
+    
+    codec_eos_token_id: 4198
+    codec_think_id: 4202
+    codec_nothink_id: 4203
+    codec_think_bos_id: 4204
+    codec_think_eos_id: 4205
+    codec_pad_id: 4196
+    codec_bos_id: 4197
+    
+    codec_language_id:
+      chinese: 4199
+      english: 4200
+      japanese: 4201
+      korean: 4206
+      german: 4208
+      italian: 4209
+      portuguese: 4210
+      spanish: 4211
+      french: 4212
+      russian: 4213
+    
+    spk_id: {}
+    spk_is_dialect: {}
+    
+    code_predictor_config:
+      model_type: qwen3_tts_talker_code_predictor
+      vocab_size: 2048
+      hidden_size: 1024
+      intermediate_size: 3072
+      num_hidden_layers: 5
+      num_attention_heads: 16
+      num_key_value_heads: 8
+      head_dim: 128
+      hidden_act: silu
+      max_position_embeddings: 32768
+      initializer_range: 0.02
+      rms_norm_eps: 0.000001
+      use_cache: true
+      tie_word_embeddings: false
+      rope_theta: 10000.0
+      attention_bias: false
+      use_sliding_window: false
+      sliding_window: 4096
+      max_window_layers: 28
+      attention_dropout: 0.0
+      num_code_groups: 16
+  
+  speaker_encoder_config:
+    mel_dim: 128
+    enc_dim: 1024
+    enc_channels: [512, 512, 512, 512, 1536]
+    enc_kernel_sizes: [5, 3, 3, 3, 1]
+    enc_dilations: [1, 2, 3, 4, 1]
+    enc_attention_channels: 128
+    enc_res2net_scale: 8
+    enc_se_channels: 128
+    sample_rate: 24000
+
+# ---------------------------------------------------------------------------
+# DATA CONFIGURATION - Preference Pairs
+# ---------------------------------------------------------------------------
+data:
+  train_dir: data/posttrain/dpo/train
+  val_dir: data/posttrain/dpo/val
+  max_codec_len: 2048
+  min_duration: 0.5
+  max_duration: 30.0
+  
+  # Preference pair format:
+  # {
+  #   "prompt": {...},
+  #   "chosen": {"audio_codes": [...], "audio_path": "..."},
+  #   "rejected": {"audio_codes": [...], "audio_path": "..."}
+  # }
+  
+  languages:
+    - chinese
+    - english
+    - german
+    - italian
+    - portuguese
+    - spanish
+    - japanese
+    - korean
+    - french
+    - russian
+
+# ---------------------------------------------------------------------------
+# TRAINING HYPERPARAMETERS
+# Paper §3.2: β=0.1 cho DPO
+# ---------------------------------------------------------------------------
+training:
+  optimizer: adamw
+  learning_rate: 5.0e-6       # Rất thấp cho DPO
+  weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  
+  lr_scheduler: cosine
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+  
+  num_train_epochs: 1
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 32      # Global batch ~64
+  
+  bf16: true
+  tf32: true
+  
+  dataloader_num_workers: 4
+  dataloader_pin_memory: true
+  
+  output_dir: outputs/checkpoints/dpo
+  save_strategy: steps
+  save_steps: 500
+  save_total_limit: 3
+  logging_steps: 5
+  
+  gradient_checkpointing: true
+  
+  # DPO cần reference model → dùng FSDP cho cả policy + reference
+  fsdp: full_shard auto_wrap
+  fsdp_config:
+    min_num_params: 10000000
+    transformer_layer_cls_to_wrap: Qwen3TTSTalkerDecoderLayer
+    backward_prefetch: backward_pre
+  
+  report_to: wandb
+  run_name: qwen3_tts_12hz_dpo
+  
+  remove_unused_columns: false
+  seed: 42
+
+# ---------------------------------------------------------------------------
+# DPO LOSS CONFIGURATION
+# ---------------------------------------------------------------------------
+loss:
+  type: dpo
+  beta: 0.1                  # Paper: β=0.1
+  label_smoothing: 0.0
+  loss_type: sigmoid         # sigmoid | ipo
+  reference_free: false       # false = dùng reference model
+
+tokenizer:
+  path: Qwen/Qwen3-TTS-Tokenizer-12Hz
+  freeze: true

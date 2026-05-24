@@ -1,0 +1,242 @@
+# ============================================================================
+# Qwen3-TTS-12Hz Post-training: Group Sparse Policy Optimization (GSPO)
+# Paper §3.2: "employ rule-based rewards and leverage GSPO to comprehensively 
+# enhance the model's capabilities and stability across tasks."
+# ============================================================================
+
+stage: gspo
+description: "Group Sparse Policy Optimization with rule-based rewards"
+resume_from: outputs/checkpoints/dpo/checkpoint-final
+
+# ---------------------------------------------------------------------------
+# MODEL CONFIGURATION (giống DPO)
+# ---------------------------------------------------------------------------
+model:
+  model_type: qwen3_tts
+  tokenizer_type: qwen3_tts_tokenizer_12hz
+  tts_model_size: "1.7b"
+  tts_model_type: base
+  
+  im_start_token_id: 151644
+  im_end_token_id: 151645
+  tts_pad_token_id: 151671
+  tts_bos_token_id: 151672
+  tts_eos_token_id: 151673
+  
+  talker_config:
+    model_type: qwen3_tts_talker
+    vocab_size: 4206
+    text_vocab_size: 3072
+    hidden_size: 2048
+    intermediate_size: 6144
+    num_hidden_layers: 24
+    num_attention_heads: 16
+    num_key_value_heads: 2
+    hidden_act: silu
+    max_position_embeddings: 32768
+    initializer_range: 0.02
+    rms_norm_eps: 0.000001
+    use_cache: true
+    tie_word_embeddings: false
+    rope_theta: 10000.0
+    rope_scaling:
+      rope_type: yarn
+      factor: 4.0
+      original_max_position_embeddings: 8192
+      attention_factor: 1.0
+      beta_fast: 32
+      beta_slow: 1
+    attention_bias: false
+    use_sliding_window: false
+    sliding_window: 4096
+    attention_dropout: 0.0
+    num_code_groups: 16
+    
+    codec_eos_token_id: 4198
+    codec_think_id: 4202
+    codec_nothink_id: 4203
+    codec_think_bos_id: 4204
+    codec_think_eos_id: 4205
+    codec_pad_id: 4196
+    codec_bos_id: 4197
+    
+    codec_language_id:
+      chinese: 4199
+      english: 4200
+      japanese: 4201
+      korean: 4206
+      german: 4208
+      italian: 4209
+      portuguese: 4210
+      spanish: 4211
+      french: 4212
+      russian: 4213
+    
+    spk_id: {}
+    spk_is_dialect: {}
+    
+    code_predictor_config:
+      model_type: qwen3_tts_talker_code_predictor
+      vocab_size: 2048
+      hidden_size: 1024
+      intermediate_size: 3072
+      num_hidden_layers: 5
+      num_attention_heads: 16
+      num_key_value_heads: 8
+      head_dim: 128
+      hidden_act: silu
+      max_position_embeddings: 32768
+      initializer_range: 0.02
+      rms_norm_eps: 0.000001
+      use_cache: true
+      tie_word_embeddings: false
+      rope_theta: 10000.0
+      attention_bias: false
+      use_sliding_window: false
+      sliding_window: 4096
+      max_window_layers: 28
+      attention_dropout: 0.0
+      num_code_groups: 16
+  
+  speaker_encoder_config:
+    mel_dim: 128
+    enc_dim: 1024
+    enc_channels: [512, 512, 512, 512, 1536]
+    enc_kernel_sizes: [5, 3, 3, 3, 1]
+    enc_dilations: [1, 2, 3, 4, 1]
+    enc_attention_channels: 128
+    enc_res2net_scale: 8
+    enc_se_channels: 128
+    sample_rate: 24000
+
+# ---------------------------------------------------------------------------
+# DATA CONFIGURATION
+# ---------------------------------------------------------------------------
+data:
+  train_dir: data/posttrain/gspo/train
+  val_dir: data/posttrain/gspo/val
+  max_codec_len: 2048
+  min_duration: 0.5
+  max_duration: 30.0
+  
+  languages:
+    - chinese
+    - english
+    - german
+    - italian
+    - portuguese
+    - spanish
+    - japanese
+    - korean
+    - french
+    - russian
+  
+  # GSPO cần reference audio để tính speaker similarity
+  require_reference_audio: true
+
+# ---------------------------------------------------------------------------
+# RULE-BASED REWARD CONFIGURATION
+# Paper §3.2: "employ rule-based rewards"
+# Reward = w_wer * (1-WER) + w_sim * SIM + w_mos * UTMOS_norm
+# ---------------------------------------------------------------------------
+reward:
+  # ASR model cho WER computation
+  asr_model: Qwen/Qwen3-ASR
+  asr_device: cuda:0
+  
+  # Speaker verification model (WavLM-based)
+  speaker_verif_model: microsoft/wavlm-large
+  
+  # UTMOS model
+  utmos_model: sarulab-speech/UTMOS22
+  
+  # Reward weights
+  w_wer: 1.0
+  w_sim: 0.5
+  w_mos: 0.3
+  
+  # Thresholds
+  wer_threshold: 0.3         # WER > 0.3 → reward = 0
+  utmos_threshold: 3.0       # UTMOS < 3.0 → penalty
+  
+  # Normalization
+  utmos_min: 1.0
+  utmos_max: 5.0
+
+# ---------------------------------------------------------------------------
+# TRAINING HYPERPARAMETERS
+# GSPO dùng PPO với group-based baseline
+# ---------------------------------------------------------------------------
+training:
+  # PPO core params
+  group_size: 4              # Số generations per prompt (GSPO group)
+  clip_range: 0.2            # PPO clip ratio
+  kl_coef: 0.01             # KL penalty coefficient
+  init_kl_coef: 0.02
+  kl_penalty: kl
+  
+  # Value function
+  value_loss_coef: 0.5
+  
+  # Optimizer
+  optimizer: adamw
+  learning_rate: 1.0e-6      # Rất thấp cho RL
+  weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  
+  lr_scheduler: cosine
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+  
+  # Training schedule
+  num_train_epochs: 1
+  per_device_train_batch_size: 1     # Mỗi prompt = 1, group_size=4 → effective batch=4
+  gradient_accumulation_steps: 16    # Global batch ~64 prompts
+  
+  # PPO epochs per batch
+  ppo_epochs: 4
+  
+  bf16: true
+  tf32: true
+  
+  dataloader_num_workers: 4
+  dataloader_pin_memory: true
+  
+  output_dir: outputs/checkpoints/gspo
+  save_strategy: steps
+  save_steps: 200
+  save_total_limit: 3
+  logging_steps: 5
+  
+  gradient_checkpointing: true
+  
+  fsdp: full_shard auto_wrap
+  fsdp_config:
+    min_num_params: 10000000
+    transformer_layer_cls_to_wrap: Qwen3TTSTalkerDecoderLayer
+  
+  report_to: wandb
+  run_name: qwen3_tts_12hz_gspo
+  
+  remove_unused_columns: false
+  seed: 42
+
+# ---------------------------------------------------------------------------
+# GENERATION PARAMS (cho sampling trong RL)
+# ---------------------------------------------------------------------------
+generation:
+  do_sample: true
+  top_k: 50
+  top_p: 1.0
+  temperature: 0.9
+  repetition_penalty: 1.05
+  max_new_tokens: 2048
+  subtalker_dosample: true
+  subtalker_top_k: 50
+  subtalker_top_p: 1.0
+  subtalker_temperature: 0.9
+
+tokenizer:
+  path: Qwen/Qwen3-TTS-Tokenizer-12Hz
+  freeze: true
